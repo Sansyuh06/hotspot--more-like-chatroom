@@ -1,8 +1,3 @@
-# LAN Chat Application
-# Computer Networks Final Project
-# This took me way longer than expected but it finally works!
-# TODO: Add more features if I have time
-
 import socket
 import threading
 import tkinter as tk
