@@ -1,286 +1,699 @@
-import socket, threading, tkinter as tk, json, sys, winsound, os, uuid, subprocess, re, base64
+import socket
+import threading
+import tkinter as tk
+import json
+import sys
+import sys
+import os
+import uuid
+import math
+import struct
+import tempfile
+import subprocess
+try:
+    import winsound
+except ImportError:
+    winsound = None
 from datetime import datetime
-from tkinter import messagebox
+from tkinter import ttk, messagebox, filedialog
 
+# Configuration
 PORT = 12345
-BUF = 4096
-KEY = "MySecretChatKey2024"
-is_running = True
+BUFFER_SIZE = 4096  # Increased buffer size for larger messages if needed
+FILE_BUFFER_SIZE = 8192
+XOR_KEY = 'SimpleChatKey123'
+running = True
 
-BG = "#0D1117"
-TXT = "#00FF00"
-TXT2 = "#1F6FEB"
-INP = "#161B22"
-BTN = "#21262D"
-ERR = "#FF6B6B"
-BRG = "#39FF14"
+# Color scheme - terminal-inspired
+BACKGROUND = "#0D1117"
+TEXT_COLOR = "#00FF00"
+ACCENT_COLOR = "#1F6FEB"
+INPUT_BG = "#161B22"
+BUTTON_BG = "#21262D"
+ERROR_COLOR = "#FF6B6B"
+SUCCESS_COLOR = "#39FF14"
 
-def _xor_bytes(b1, b2):
-    out = bytearray(len(b1))
-    k = len(b2)
-    for i, x in enumerate(b1):
-        out[i] = x ^ b2[i % k]
-    return bytes(out)
+def xor_encrypt_decrypt(data, key):
+    """Simple XOR encryption for basic message obfuscation"""
+    result = ""
+    for i, char in enumerate(data):
+        result += chr(ord(char) ^ ord(key[i % len(key)]))
+    return result
 
-def encrypt_message(msg, key):
-    try:
-        x = _xor_bytes(msg.encode(), key.encode())
-        return base64.b64encode(x).decode()
-    except:
-        return base64.b64encode(msg.encode()).decode()
-
-def decrypt_message(enc, key):
-    try:
-        raw = base64.b64decode(enc)
-        d = _xor_bytes(raw, key.encode())
-        return d.decode(errors="replace")
-    except:
-        try:
-            return base64.b64decode(enc).decode(errors="replace")
-        except:
-            return ""
-
-def get_my_ip():
+def get_local_ip():
+    """Get the local IP address"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        s.connect(('8.8.8.8', 80))
+        local_ip = s.getsockname()[0]
         s.close()
-        return ip
+        return local_ip
     except:
-        return "127.0.0.1"
+        return '127.0.0.1'
 
-def get_broadcast():
-    p = get_my_ip().split(".")
-    return f"{p[0]}.{p[1]}.{p[2]}.255" if len(p)==4 else "255.255.255.255"
+def get_broadcast_ip():
+    """Calculate broadcast address from local IP"""
+    ip_parts = get_local_ip().split('.')
+    if len(ip_parts) == 4:
+        return '.'.join(ip_parts[:-1] + ['255'])
+    return '255.255.255.255'
 
-def get_mac():
+# Setup UDP socket for broadcasting
+def setup_socket():
+    """Setup and configure the UDP socket"""
     try:
-        out = subprocess.run(["getmac","/format","list"],capture_output=True,text=True,timeout=4)
-        if out.returncode==0:
-            for ln in out.stdout.splitlines():
-                if "Physical Address" in ln and "=" in ln:
-                    m = ln.split("=")[1].strip()
-                    if m and m!="N/A":
-                        return m.replace("-" ,":").upper()
-        n = uuid.getnode()
-        return ":".join(re.findall("..", "%012x" % n)).upper()
-    except:
-        return "00:00:00:00:00:00"
-
-def sock():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.settimeout(1)
-        s.bind(("", PORT))
-        return s
-    except:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(1.0)
+        sock.bind(('', PORT))
+        return sock
+    except socket.error as e:
+        print(f"Network setup failed: {e}")
+        print("This might be due to:")
+        print("- Port already in use")
+        print("- Firewall blocking the connection")
+        print("- Network adapter issues")
+        return None
+    except Exception as e:
+        print(f"Unexpected error during network setup: {e}")
         return None
 
-main_sock = sock()
-if not main_sock:
-    print("Socket fail")
-    input()
+sock = setup_socket()
+if sock is None:
+    print("Failed to initialize network. Exiting...")
     sys.exit(1)
 
-class LanChatApp:
+class ChatApp:
     def __init__(self, root):
         self.root = root
-        self.my_ip = get_my_ip()
-        self.bc = get_broadcast()
-        self.username = None
-        self.connected = False
-        self.sounds = True
-        self.notifs = True
-        self.my_id = str(uuid.uuid4())
-        self.hist = set()
-        self.my_mac = get_mac()
+        self.local_ip = get_local_ip()
+        self.broadcast_ip = get_broadcast_ip()
+        self.nickname = None
+        self.nickname_set = False
+        self.sound_enabled = True
+        self.notifications_enabled = True
+        self.client_id = str(uuid.uuid4())  # Unique identifier for this client
+        self.sent_messages = set()  # Track sent message IDs to avoid duplicates
+        self.is_focused = True
+        
+        # Window setup
+        root.title("LAN Chat")
+        root.geometry("900x700")
+        root.configure(bg=BACKGROUND)
+        
+        # Focus binding
+        root.bind("<FocusIn>", self.on_focus_in)
+        root.bind("<FocusOut>", self.on_focus_out)
+        
+        # Header
+        header_frame = tk.Frame(root, bg=BACKGROUND)
+        header_frame.pack(fill="x", pady=10)
+        
+        title_label = tk.Label(header_frame, text="LAN Chat", 
+                              bg=BACKGROUND, fg=SUCCESS_COLOR, 
+                              font=("Consolas", 16, "bold"))
+        title_label.pack()
+        
+        connection_label = tk.Label(header_frame, 
+                                   text=f"Connected to {self.local_ip}:{PORT}",
+                                   bg=BACKGROUND, fg=ACCENT_COLOR, 
+                                   font=("Consolas", 10))
+        connection_label.pack()
+        
+        # Nickname input section
+        self.nickname_frame = tk.Frame(root, bg=BACKGROUND)
+        self.nickname_frame.pack(fill="x", padx=10, pady=20)
+        
+        nickname_label = tk.Label(self.nickname_frame, 
+                                 text="Enter your nickname:",
+                                 bg=BACKGROUND, fg=TEXT_COLOR, 
+                                 font=("Consolas", 12))
+        nickname_label.pack(pady=10)
+        
+        self.nickname_entry = tk.Entry(self.nickname_frame, 
+                                      bg=INPUT_BG, fg=TEXT_COLOR,
+                                      font=("Consolas", 12), 
+                                      insertbackground=TEXT_COLOR,
+                                      relief="flat", bd=2)
+        self.nickname_entry.pack(pady=5, padx=20, fill="x")
+        self.nickname_entry.bind('<Return>', self.set_nickname)
+        
+        join_button = tk.Button(self.nickname_frame, text="JOIN CHAT",
+                               bg=BUTTON_BG, fg=TEXT_COLOR,
+                               font=("Consolas", 10, "bold"),
+                               command=self.set_nickname,
+                               relief="flat", padx=20)
+        join_button.pack(pady=10)
+        
+        # Chat display area
+        self.chat_frame = tk.Frame(root, bg=BACKGROUND)
+        
+        scrollbar = tk.Scrollbar(self.chat_frame, bg=BUTTON_BG, 
+                                troughcolor=BACKGROUND)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.chat_display = tk.Text(self.chat_frame, bg=BACKGROUND, 
+                                   fg=TEXT_COLOR, font=("Consolas", 11),
+                                   state='disabled', 
+                                   insertbackground=TEXT_COLOR,
+                                   relief="flat", 
+                                   yscrollcommand=scrollbar.set,
+                                   wrap="word")
+        self.chat_display.pack(fill="both", expand=True)
+        scrollbar.config(command=self.chat_display.yview)
+        
+        # Message input area
+        self.input_frame = tk.Frame(root, bg=BACKGROUND)
+        
+        self.message_entry = tk.Entry(self.input_frame, bg=INPUT_BG, 
+                                     fg=TEXT_COLOR, 
+                                     font=("Consolas", 12),
+                                     insertbackground=TEXT_COLOR,
+                                     relief="flat", bd=2)
+        self.message_entry.pack(side="left", fill="x", expand=True, padx=5)
+        self.message_entry.bind('<Return>', self.send_message)
+        
+        send_button = tk.Button(self.input_frame, text="SEND",
+                               bg=BUTTON_BG, fg=TEXT_COLOR,
+                               font=("Consolas", 10, "bold"),
+                               command=self.send_message,
+                               relief="flat", padx=15)
+        send_button.pack(side="right", padx=5)
+        
+        file_button = tk.Button(self.input_frame, text="FILE",
+                               bg=BUTTON_BG, fg=ACCENT_COLOR,
+                               font=("Consolas", 10, "bold"),
+                               command=self.send_file_action,
+                               relief="flat", padx=15)
+        file_button.pack(side="right", padx=5)
+        
+        self.nickname_entry.focus_set()
+        
+        # Start receiving messages in background
+        receive_thread = threading.Thread(target=self.receive_messages, 
+                                         daemon=True)
+        receive_thread.start()
 
-        self._ui()
-        threading.Thread(target=self._listen, daemon=True).start()
+    def set_nickname(self, event=None):
+        """Set user nickname and join the chat"""
+        nickname = self.nickname_entry.get().strip()
+        if not nickname:
+            self.show_error("Please enter a nickname!")
+            return
+            
+        if len(nickname) > 20:
+            self.show_error("Nickname must be 20 characters or less!")
+            return
+            
+        # Check for invalid characters
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        if any(char in nickname for char in invalid_chars):
+            self.show_error("Nickname contains invalid characters!")
+            return
+            
+        self.nickname = nickname
+        self.nickname_set = True
+        
+        # Hide nickname input, show chat interface
+        self.nickname_frame.pack_forget()
+        self.chat_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.input_frame.pack(fill="x", padx=10, pady=10)
+        
+        self.root.title(f"LAN Chat - {self.nickname}")
+        self.message_entry.focus_set()
+        
+        # Broadcast join message
+        join_data = {
+            'type': 'join',
+            'nickname': self.nickname,
+            'ip': self.local_ip,
+            'client_id': self.client_id,
+            'message_id': str(uuid.uuid4())
+        }
+        self.send_data(join_data)
+        self.display_message("Connected to LAN Chat!", SUCCESS_COLOR)
 
-    def _ui(self):
-        r = self.root
-        r.title("LAN Chat")
-        r.geometry("900x700")
-        r.configure(bg=BG)
-
-        top = tk.Frame(r, bg=BG); top.pack(fill="x", pady=8)
-        tk.Label(top, text="LAN Chat", bg=BG, fg=BRG, font=("Consolas",16,"bold")).pack()
-        tk.Label(top, text=f"{self.my_ip}:{PORT}", bg=BG, fg=TXT2, font=("Consolas",10)).pack()
-
-        self.logf = tk.Frame(r, bg=BG); self.logf.pack(fill="x", padx=10, pady=15)
-        tk.Label(self.logf, text="Username:", bg=BG, fg=TXT, font=("Consolas",12)).pack(pady=6)
-        self.user_in = tk.Entry(self.logf, bg=INP, fg=TXT, font=("Consolas",12), insertbackground=TXT, relief="flat")
-        self.user_in.pack(pady=4, padx=20, fill="x")
-        self.user_in.bind("<Return>", self.join_chat)
-        tk.Button(self.logf, text="JOIN", bg=BTN, fg=TXT, font=("Consolas",10,"bold"), command=self.join_chat, relief="flat").pack(pady=8)
-
-        self.chf = tk.Frame(r, bg=BG)
-        sb = tk.Scrollbar(self.chf); sb.pack(side="right", fill="y")
-        self.text = tk.Text(self.chf, bg=BG, fg=TXT,font=("Consolas",11),state="disabled", wrap="word", yscrollcommand=sb.set, relief="flat")
-        self.text.pack(fill="both", expand=True)
-        sb.config(command=self.text.yview)
-
-        self.msgf = tk.Frame(r, bg=BG)
-        self.msg_in = tk.Entry(self.msgf,bg=INP, fg=TXT, font=("Consolas",12), insertbackground=TXT, relief="flat")
-        self.msg_in.pack(side="left", fill="x", expand=True, padx=5)
-        self.msg_in.bind("<Return>", self.send_msg)
-        tk.Button(self.msgf,text="SEND",bg=BTN,fg=TXT,font=("Consolas",10,"bold"),command=self.send_msg,relief="flat").pack(side="right", padx=5)
-
-        self.user_in.focus_set()
-
-    def join_chat(self, e=None):
-        name = self.user_in.get().strip()
-        if not name or len(name)>20 or any(ch in name for ch in "/\\:*?\"<>|"):
-            return self._err("Invalid username")
-
-        self.username = name
-        self.connected = True
-        self.logf.pack_forget()
-        self.chf.pack(fill="both", expand=True, padx=10, pady=5)
-        self.msgf.pack(fill="x", padx=10, pady=10)
-        self.root.title(f"{name} - LAN Chat")
-
-        m = {"type":"join","username":name,"ip":self.my_ip,"mac":self.my_mac,"id":self.my_id,"msg_id":str(uuid.uuid4())}
-        self._send(m)
-        self._add("Welcome!", BRG)
-
-    def _send(self, d):
+    def send_data(self, message):
+        """Encrypt and broadcast message to network"""
         try:
-            enc = encrypt_message(json.dumps(d), KEY)
-            main_sock.sendto(enc.encode(), (self.bc, PORT))
-        except:
-            self._add("Network issue", ERR)
+            json_data = json.dumps(message)
+            encrypted = xor_encrypt_decrypt(json_data, XOR_KEY)
+            sock.sendto(encrypted.encode('utf-8'), 
+                       (self.broadcast_ip, PORT))
+        except socket.error as e:
+            self.display_message(f"Network error: {e}", ERROR_COLOR)
+            self.show_error(f"Failed to send message: {e}")
+        except Exception as e:
+            self.display_message(f"Send error: {e}", ERROR_COLOR)
+            self.show_error(f"Unexpected error: {e}")
 
-    def _listen(self):
-        global is_running
-        while is_running:
+    def receive_messages(self):
+        """Listen for incoming messages"""
+        while running:
             try:
-                data, addr = main_sock.recvfrom(BUF)
+                data, addr = sock.recvfrom(BUFFER_SIZE)
+                
+                # Skip if not connected yet
+                if not self.nickname_set:
+                    continue
+                
+                # Decrypt and parse message
+                try:
+                    decrypted = xor_encrypt_decrypt(data.decode('utf-8'), XOR_KEY)
+                    message = json.loads(decrypted)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue  # Skip malformed messages
+                
+                # Ignore messages from this client (using client_id)
+                if message.get('client_id') == self.client_id:
+                    continue
+                
+                # Check for duplicate messages using message_id
+                message_id = message.get('message_id')
+                if message_id and message_id in self.sent_messages:
+                    continue
+                
+                # Add message_id to tracking set (keep only last 100 to prevent memory issues)
+                if message_id:
+                    self.sent_messages.add(message_id)
+                    if len(self.sent_messages) > 100:
+                        # Remove oldest entries (this is a simple approach)
+                        self.sent_messages = set(list(self.sent_messages)[-50:])
+                
+                if message.get('type') == 'join':
+                    join_text = f"{message.get('nickname', 'Unknown')} JOINED"
+                    self.display_message(join_text, SUCCESS_COLOR)
+                    self.play_notification_sound('join')
+                    self.show_notification(f"{message.get('nickname', 'Someone')} joined the chat")
+                    
+                elif message.get('type') == 'file_offer':
+                    nick = message.get('nickname', 'Unknown')
+                    fname = message.get('filename', '?')
+                    fsize = message.get('filesize', 0)
+                    ip = message.get('ip')
+                    port = message.get('tcp_port')
+                    
+                    self.display_file_offer(nick, fname, fsize, ip, port)
+                    self.play_notification_sound('message')
+                    self.show_notification(f"{nick} shared a file: {fname}")
+                    self.flash_window()
+                    
+                elif message.get('type') == 'leave':
+                    leave_text = f"{message.get('nickname', 'Unknown')} LEFT"
+                    self.display_message(leave_text, ERROR_COLOR)
+                    self.play_notification_sound('leave')
+                    self.show_notification(f"{message.get('nickname', 'Unknown')} left the chat")
+                    
+                elif message.get('type') == 'message':
+                    nickname = message.get('nickname', 'Unknown')
+                    msg_text = message.get('message', '')
+                    chat_text = f"{nickname}: {msg_text}"
+                    self.display_message(chat_text, TEXT_COLOR)
+                    self.play_notification_sound('message')
+                    self.show_notification(f"New message from {nickname}")
+                    self.flash_window()
+                    
             except socket.timeout:
                 continue
-            except:
-                if self.connected: self._add("Network error", ERR)
-                continue
+            except socket.error as e:
+                if running and self.nickname_set:
+                    self.display_message(f"Network error: {e}", ERROR_COLOR)
+            except Exception as e:
+                if running and self.nickname_set:
+                    self.display_message(f"Receive error: {e}", ERROR_COLOR)
 
-            if not self.connected: continue
-            try:
-                dec = decrypt_message(data.decode(), KEY)
-                obj = json.loads(dec)
-            except:
-                continue
+    def display_message(self, message, color):
+        """Display message in chat window with timestamp"""
+        def update_display():
+            self.chat_display.config(state='normal')
+            
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            full_message = f"[{timestamp}] {message}\n"
+            
+            self.chat_display.insert(tk.END, full_message)
+            self.chat_display.tag_add("color", "end-2l", "end-1l")
+            self.chat_display.tag_config("color", foreground=color)
+            
+            self.chat_display.config(state='disabled')
+            self.chat_display.see(tk.END)
+        
+        self.root.after(0, update_display)
 
-            if obj.get("id")==self.my_id: continue
-            mid = obj.get("msg_id")
-            if mid and mid in self.hist: continue
-            if mid:
-                self.hist.add(mid)
-                if len(self.hist)>500:
-                    self.hist = set(list(self.hist)[-250:])
-
-            t = obj.get("type")
-            if t=="join":
-                u = obj.get("username","?")
-                self._add(f"{u} joined", BRG)
-                self._sound("join")
-                self._notify()
-            elif t=="leave":
-                u = obj.get("username","?")
-                self._add(f"{u} left", ERR)
-                self._sound("leave")
-            elif t=="chat":
-                u = obj.get("username","?")
-                msg = obj.get("text","")
-                self._add(f"{u}: {msg}", TXT)
-                self._sound("msg")
-                self._notify()
-                self._blink()
-
-    def _add(self, msg, col):
-        def go():
-            self.text.config(state="normal")
-            t = datetime.now().strftime("%H:%M:%S")
-            s = f"[{t}] {msg}\n"
-            self.text.insert("end", s)
-            self.text.tag_add("c","end-2l","end-1l")
-            self.text.tag_config("c",foreground=col)
-            self.text.config(state="disabled")
-            self.text.see("end")
-        self.root.after(0, go)
-
-    def send_msg(self, e=None):
-        m = self.msg_in.get().strip()
-        if not m: return
-        if len(m)>500: return self._err("Too long")
-        if m.startswith("/"):
-            return self._cmd(m)
-        mid = str(uuid.uuid4())
-        d = {"type":"chat","username":self.username,"text":m,"ip":self.my_ip,"mac":self.my_mac,"id":self.my_id,"msg_id":mid}
-        self.hist.add(mid)
-        self._send(d)
-        self._add(f"You: {m}", TXT2)
-        self.msg_in.delete(0, "end")
-
-    def _cmd(self, c):
-        c = c.strip().lower()
-        if c=="/clear":
-            self.text.config(state="normal"); self.text.delete(1.0,"end"); self.text.config(state="disabled")
-            self._add("Cleared", BRG)
-        elif c=="/help":
-            self._add("Commands:\n/clear\n/help", BRG)
+    def send_message(self, event=None):
+        """Send message or handle commands"""
+        text = self.message_entry.get().strip()
+        if not text:
+            return
+            
+        if len(text) > 500:
+            self.show_error("Message too long! Maximum 500 characters.")
+            return
+            
+        if text.startswith('/'):
+            self.handle_command(text)
         else:
-            self._add("Unknown cmd", ERR)
+            message_id = str(uuid.uuid4())
+            message_data = {
+                'type': 'message',
+                'nickname': self.nickname,
+                'message': text,
+                'ip': self.local_ip,
+                'client_id': self.client_id,
+                'message_id': message_id
+            }
+            # Track this message ID to avoid receiving our own message
+            self.sent_messages.add(message_id)
+            self.send_data(message_data)
+            self.display_message(f"You: {text}", ACCENT_COLOR)
+        
+        self.message_entry.delete(0, tk.END)
 
-    def _sound(self, t):
-        if not self.sounds: return
+    def handle_command(self, text):
+        """Process chat commands"""
+        command = text.lower()
+        
+        if command == '/clear':
+            self.chat_display.config(state='normal')
+            self.chat_display.delete(1.0, tk.END)
+            self.chat_display.config(state='disabled')
+            self.display_message("Chat cleared", SUCCESS_COLOR)
+            
+        elif command == '/help':
+            help_text = "Available commands:\n/help - Show this help\n/clear - Clear chat"
+            self.display_message(help_text, SUCCESS_COLOR)
+            
+        else:
+            self.display_message(f"Unknown command: {text}. Type /help for available commands.", ERROR_COLOR)
+
+
+    def on_focus_in(self, event):
+        self.is_focused = True
+
+    def on_focus_out(self, event):
+        self.is_focused = False
+
+    def play_sound_cross_platform(self, frequency, duration):
+        """Play sound on Windows or Linux with threading and fallback"""
+        def _play():
+            try:
+                # Ensure integer types
+                freq = int(frequency)
+                dur = int(duration)
+                
+                if winsound:
+                    try:
+                        winsound.Beep(freq, dur)
+                    except Exception as e:
+                        print(f"DEBUG: winsound.Beep failed: {e}")
+                        # Fallback to system beep
+                        try:
+                            winsound.MessageBeep(winsound.MB_OK)
+                        except:
+                            pass
+                else:
+                    # Linux/Mac fallback (existing logic)
+                    try:
+                        sample_rate = 44100
+                        n_samples = int(sample_rate * (dur / 1000.0))
+                        
+                        audio = []
+                        for i in range(n_samples):
+                            value = int(32767.0 * 0.5 * math.sin(2.0 * math.pi * freq * i / sample_rate))
+                            audio.append(struct.pack('<h', value))
+                        
+                        audio_data = b''.join(audio)
+                        
+                        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tf:
+                            tmp_name = tf.name
+                            tf.write(b'RIFF')
+                            tf.write(struct.pack('<I', 36 + len(audio_data)))
+                            tf.write(b'WAVEfmt ')
+                            tf.write(struct.pack('<I', 16))
+                            tf.write(struct.pack('<H', 1))
+                            tf.write(struct.pack('<H', 1))
+                            tf.write(struct.pack('<I', sample_rate))
+                            tf.write(struct.pack('<I', sample_rate * 2))
+                            tf.write(struct.pack('<H', 2))
+                            tf.write(struct.pack('<H', 16))
+                            tf.write(b'data')
+                            tf.write(struct.pack('<I', len(audio_data)))
+                            tf.write(audio_data)
+                            
+                        try:
+                            subprocess.run(['aplay', '-q', tmp_name], check=False)
+                        except FileNotFoundError:
+                            try:
+                                subprocess.run(['paplay', tmp_name], check=False)
+                            except FileNotFoundError:
+                                pass
+                        
+                        try:
+                            os.remove(tmp_name)
+                        except:
+                            pass
+                    except Exception:
+                        pass
+            except Exception as e:
+                 print(f"DEBUG: Sound playback error: {e}")
+
+        # Run sound in a separate thread to avoid blocking
+        threading.Thread(target=_play, daemon=True).start()
+
+    def play_notification_sound(self, sound_type='message'):
+        """Play notification sound based on type and window focus"""
+        if not self.sound_enabled:
+            return
+            
         try:
-            if t in ("join","leave"): winsound.Beep(800,200)
-            elif t=="msg": winsound.Beep(600,150)
-            else: winsound.Beep(400,300)
-        except:
+            if sound_type == 'join':
+                # Join sound - Medium high
+                self.play_sound_cross_platform(1000, 150)
+            elif sound_type == 'leave':
+                 # Leave sound - Lower pitch, slightly longer
+                 self.play_sound_cross_platform(600, 300)
+            elif sound_type == 'error':
+                 self.play_sound_cross_platform(300, 300)
+            elif sound_type == 'message':
+                if self.is_focused:
+                    # Active - High Pitch (Active)
+                    self.play_sound_cross_platform(1200, 150)
+                else:
+                    # Inactive - Low Pitch (Inactive)
+                    self.play_sound_cross_platform(300, 300)
+        except Exception:
             pass
 
-    def _notify(self):
-        if not self.notifs: return
+    def show_notification(self, message):
+        """Show visual notification"""
+        if not self.notifications_enabled:
+            return
+            
+        # Flash the taskbar if window is not focused
         try:
             if not self.root.focus_get():
-                self.root.attributes("-topmost",True)
-                self.root.after(100,lambda: self.root.attributes("-topmost",False))
-        except:
+                self.root.attributes('-topmost', True)
+                self.root.after(100, lambda: self.root.attributes('-topmost', False))
+        except Exception:
             pass
 
-    def _blink(self):
-        if not self.notifs: return
-        old = self.root.title()
-        self.root.title("** NEW MESSAGE ** " + old)
-        self.root.after(2000, lambda: self.root.title(old))
+    def flash_window(self):
+        """Flash the window to get attention"""
+        if not self.notifications_enabled:
+            return
+            
+        try:
+            # Change title briefly to indicate new message
+            original_title = self.root.title()
+            self.root.title("*** NEW MESSAGE *** " + original_title)
+            self.root.after(2000, lambda: self.root.title(original_title))
+        except Exception:
+            pass
 
-    def _err(self, m):
-        self._sound("err")
-        try: messagebox.showerror("Error",m)
-        except: pass
+    def show_error(self, message):
+        """Show error dialog and play error sound"""
+        self.play_notification_sound('error')
+        messagebox.showerror("Error", message)
 
-    def cleanup_and_exit(self):
-        global is_running
-        is_running=False
-        if self.connected:
+
+
+    def send_file_action(self):
+        """Handle file selection and offering"""
+        filename = filedialog.askopenfilename()
+        if not filename:
+            return
+            
+        # Start server in a thread
+        try:
+            # Create a TCP socket for this file
+            file_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            file_sock.bind(('', 0)) # Random port
+            port = file_sock.getsockname()[1]
+            file_sock.listen(5)
+            
+            file_size = os.path.getsize(filename)
+            file_basename = os.path.basename(filename)
+            
+            # Start the server thread
+            threading.Thread(target=self.file_server_thread, 
+                           args=(file_sock, filename), daemon=True).start()
+            
+            # Broadcast offer
+            offer_id = str(uuid.uuid4())
+            offer_data = {
+                'type': 'file_offer',
+                'nickname': self.nickname,
+                'filename': file_basename,
+                'filesize': file_size,
+                'ip': self.local_ip,
+                'tcp_port': port,
+                'client_id': self.client_id,
+                'message_id': offer_id
+            }
+            self.send_data(offer_data)
+            self.sent_messages.add(offer_id)
+            
+            self.display_message(f"You offered file: {file_basename} ({self.format_size(file_size)})", ACCENT_COLOR)
+            
+        except Exception as e:
+            self.show_error(f"Failed to start file share: {e}")
+
+    def file_server_thread(self, sock, filepath):
+        """Serve the file to connecting clients"""
+        try:
+            # Serve for a limited time or until app closes
+            # For simplicity, we just loop forever in this daemon thread
+            # In a real app, you might want a timeout or management
+            while running:
+                client, addr = sock.accept()
+                threading.Thread(target=self.handle_file_client, 
+                               args=(client, filepath), daemon=True).start()
+        except:
+            pass
+        finally:
             try:
-                self._send({"type":"leave","username":self.username,"ip":self.my_ip,"mac":self.my_mac,"id":self.my_id,"msg_id":str(uuid.uuid4())})
-            except: pass
-        try: main_sock.close()
-        except: pass
-        try: self.root.destroy()
-        except: pass
+                sock.close()
+            except:
+                pass
 
-if __name__=="__main__":
-    print("Starting LAN Chat…")
+    def handle_file_client(self, client_sock, filepath):
+        """Send file data to a single client"""
+        try:
+            with open(filepath, 'rb') as f:
+                while True:
+                    data = f.read(FILE_BUFFER_SIZE)
+                    if not data:
+                        break
+                    client_sock.sendall(data)
+        except:
+            pass
+        finally:
+            client_sock.close()
+
+    def display_file_offer(self, nickname, filename, filesize, ip, port):
+        """Display a file offer with a download button"""
+        def update_ui():
+            self.chat_display.config(state='normal')
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            
+            # Header
+            header = f"[{timestamp}] {nickname} is sharing a file:\n"
+            self.chat_display.insert(tk.END, header)
+            
+            # File info
+            info = f"  {filename} ({self.format_size(filesize)})  "
+            self.chat_display.insert(tk.END, info)
+            
+            # Download button
+            btn = tk.Button(self.chat_display, text="DOWNLOAD", 
+                           font=("Consolas", 8, "bold"),
+                           bg=ACCENT_COLOR, fg="white",
+                           cursor="hand2",
+                           command=lambda: self.start_download(filename, filesize, ip, port))
+            self.chat_display.window_create(tk.END, window=btn)
+            self.chat_display.insert(tk.END, "\n")
+            
+            self.chat_display.config(state='disabled')
+            self.chat_display.see(tk.END)
+            
+        self.root.after(0, update_ui)
+
+    def start_download(self, filename, filesize, ip, port):
+        """Start file download process"""
+        save_path = filedialog.asksaveasfilename(initialfile=filename)
+        if not save_path:
+            return
+            
+        threading.Thread(target=self.download_thread, 
+                       args=(save_path, filesize, ip, port), daemon=True).start()
+
+    def download_thread(self, save_path, filesize, ip, port):
+        """Execute download in background"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(10) # Connect timeout
+            s.connect((ip, port))
+            
+            received = 0
+            with open(save_path, 'wb') as f:
+                while True:
+                    data = s.recv(FILE_BUFFER_SIZE)
+                    if not data:
+                        break
+                    f.write(data)
+                    received += len(data)
+                    # We could update progress here if we had a progress bar
+            
+            s.close()
+            
+            if received == filesize:
+                self.root.after(0, lambda: messagebox.showinfo("Download Complete", 
+                                                             f"File saved to:\n{save_path}"))
+            else:
+                self.root.after(0, lambda: self.show_error(
+                    f"Download incomplete.\nReceived {self.format_size(received)} of {self.format_size(filesize)}"))
+                
+        except Exception as e:
+            self.root.after(0, lambda: self.show_error(f"Download failed: {e}"))
+
+    def format_size(self, size):
+        """Format bytes to human readable string"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
+
+    def on_closing(self):
+        """Clean up when closing the application"""
+        global running
+        running = False
+        
+        # Send leave message
+        if self.nickname_set:
+            try:
+                leave_data = {
+                    'type': 'leave',
+                    'nickname': self.nickname,
+                    'ip': self.local_ip,
+                    'client_id': self.client_id,
+                    'message_id': str(uuid.uuid4())
+                }
+                self.send_data(leave_data)
+            except Exception:
+                pass
+        
+        try:
+            sock.close()
+        except Exception:
+            pass
+        
+        self.root.destroy()
+    
+if __name__ == "__main__":
+    print(f"Your IP: {get_local_ip()}")
+    print(f"Port: {PORT}")
     root = tk.Tk()
-    app = LanChatApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.cleanup_and_exit)
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        app.cleanup_and_exit()
+    app = ChatApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
