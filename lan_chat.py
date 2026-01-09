@@ -44,9 +44,17 @@ def get_local_ip():
     """Get the local IP address"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
-        local_ip = s.getsockname()[0]
-        s.close()
+        # Try to connect to a public DNS provider
+        try:
+            s.connect(('8.8.8.8', 80))
+            local_ip = s.getsockname()[0]
+        except:
+            # Fallback: try to connect to a private address (doesn't need to be reachable)
+            # This helps pick the main interface on some systems
+            s.connect(('10.255.255.255', 1))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
         return local_ip
     except:
         return '127.0.0.1'
@@ -166,13 +174,15 @@ class ChatApp:
         # Message input area
         self.input_frame = tk.Frame(root, bg=BACKGROUND)
         
-        self.message_entry = tk.Entry(self.input_frame, bg=INPUT_BG, 
+        self.message_entry = tk.Text(self.input_frame, bg=INPUT_BG, 
                                      fg=TEXT_COLOR, 
                                      font=("Consolas", 12),
                                      insertbackground=TEXT_COLOR,
-                                     relief="flat", bd=2)
-        self.message_entry.pack(side="left", fill="x", expand=True, padx=5)
-        self.message_entry.bind('<Return>', self.send_message)
+                                     relief="flat", bd=2,
+                                     height=3)
+        self.message_entry.pack(side="left", fill="x", expand=True, padx=5, pady=5)
+        self.message_entry.bind('<Return>', self.handle_return)
+        self.message_entry.bind('<Shift-Return>', self.handle_shift_return)
         
         send_button = tk.Button(self.input_frame, text="SEND",
                                bg=BUTTON_BG, fg=TEXT_COLOR,
@@ -340,14 +350,24 @@ class ChatApp:
         
         self.root.after(0, update_display)
 
+    def handle_return(self, event):
+        """Handle Enter key to send message"""
+        if not event.state & 0x1: # Check if Shift is not pressed
+            self.send_message()
+            return "break" # Prevent newline insertion
+            
+    def handle_shift_return(self, event):
+        """Handle Shift+Enter to insert newline"""
+        return # Allow default behavior
+
     def send_message(self, event=None):
         """Send message or handle commands"""
-        text = self.message_entry.get().strip()
+        text = self.message_entry.get("1.0", tk.END).strip()
         if not text:
             return
             
-        if len(text) > 500:
-            self.show_error("Message too long! Maximum 500 characters.")
+        if len(text) > 3000:
+            self.show_error("Message too long! Maximum 3000 characters.")
             return
             
         if text.startswith('/'):
@@ -367,7 +387,7 @@ class ChatApp:
             self.send_data(message_data)
             self.display_message(f"You: {text}", ACCENT_COLOR)
         
-        self.message_entry.delete(0, tk.END)
+        self.message_entry.delete("1.0", tk.END)
 
     def handle_command(self, text):
         """Process chat commands"""
@@ -527,7 +547,7 @@ class ChatApp:
         try:
             # Create a TCP socket for this file
             file_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            file_sock.bind(('', 0)) # Random port
+            file_sock.bind(('0.0.0.0', 0)) # Explicitly bind to all interfaces
             port = file_sock.getsockname()[1]
             file_sock.listen(5)
             
@@ -604,12 +624,14 @@ class ChatApp:
             info = f"  {filename} ({self.format_size(filesize)})  "
             self.chat_display.insert(tk.END, info)
             
-            # Download button
+             # Download button
             btn = tk.Button(self.chat_display, text="DOWNLOAD", 
                            font=("Consolas", 8, "bold"),
                            bg=ACCENT_COLOR, fg="white",
-                           cursor="hand2",
-                           command=lambda: self.start_download(filename, filesize, ip, port))
+                           cursor="hand2")
+            # Configure command separately to pass button reference
+            btn.configure(command=lambda b=btn: self.start_download(filename, filesize, ip, port, b))
+            
             self.chat_display.window_create(tk.END, window=btn)
             self.chat_display.insert(tk.END, "\n")
             
@@ -618,16 +640,23 @@ class ChatApp:
             
         self.root.after(0, update_ui)
 
-    def start_download(self, filename, filesize, ip, port):
+    def start_download(self, filename, filesize, ip, port, btn):
         """Start file download process"""
-        save_path = filedialog.asksaveasfilename(initialfile=filename)
-        if not save_path:
+        try:
+            save_path = filedialog.asksaveasfilename(initialfile=filename)
+        except Exception as e:
+            print(f"File dialog error: {e}")
             return
             
+        if not save_path:
+            return
+        
+        btn.config(state='disabled', text="Starting...", bg=BUTTON_BG)
+            
         threading.Thread(target=self.download_thread, 
-                       args=(save_path, filesize, ip, port), daemon=True).start()
+                       args=(save_path, filesize, ip, port, btn), daemon=True).start()
 
-    def download_thread(self, save_path, filesize, ip, port):
+    def download_thread(self, save_path, filesize, ip, port, btn):
         """Execute download in background"""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -635,6 +664,8 @@ class ChatApp:
             s.connect((ip, port))
             
             received = 0
+            last_update_time = 0
+            
             with open(save_path, 'wb') as f:
                 while True:
                     data = s.recv(FILE_BUFFER_SIZE)
@@ -642,19 +673,44 @@ class ChatApp:
                         break
                     f.write(data)
                     received += len(data)
-                    # We could update progress here if we had a progress bar
+                    
+                    # Update progress every 100ms or so to avoid overwhelming UI thread
+                    current_time = datetime.now().timestamp()
+                    if current_time - last_update_time > 0.1:
+                        percent = int((received / filesize) * 100) if filesize > 0 else 0
+                        self.root.after(0, lambda p=percent: btn.config(text=f"{p}%"))
+                        last_update_time = current_time
             
             s.close()
             
             if received == filesize:
+                self.root.after(0, lambda: btn.config(text="OPEN", bg=SUCCESS_COLOR, state='normal', 
+                                                     command=lambda: self.open_file(save_path)))
                 self.root.after(0, lambda: messagebox.showinfo("Download Complete", 
                                                              f"File saved to:\n{save_path}"))
             else:
                 self.root.after(0, lambda: self.show_error(
                     f"Download incomplete.\nReceived {self.format_size(received)} of {self.format_size(filesize)}"))
+                self.root.after(0, lambda: btn.config(text="RETRY", state='normal', bg=ERROR_COLOR))
                 
         except Exception as e:
-            self.root.after(0, lambda: self.show_error(f"Download failed: {e}"))
+            print(f"Download thread error: {e}") # Console log for debug
+            error_msg = f"Download failed: {e}"
+            self.root.after(0, lambda: self.show_error(error_msg))
+            self.root.after(0, lambda: btn.config(text="ERROR", bg=ERROR_COLOR))
+
+    def open_file(self, filepath):
+        """Open the downloaded file"""
+        try:
+            if sys.platform == 'win32':
+                os.startfile(filepath)
+            elif sys.platform == 'darwin':
+                subprocess.call(('open', filepath))
+            else:
+                subprocess.call(('xdg-open', filepath))
+        except Exception as e:
+            print(f"Open file error: {e}")
+            self.show_error(f"Could not open file: {e}\nLocation: {filepath}")
 
     def format_size(self, size):
         """Format bytes to human readable string"""
