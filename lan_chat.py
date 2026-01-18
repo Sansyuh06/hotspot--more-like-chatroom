@@ -1,3 +1,9 @@
+
+
+
+
+
+
 import socket
 import threading
 import tkinter as tk
@@ -387,6 +393,8 @@ class ChatApp:
             self.send_data(message_data)
             self.display_message(f"You: {text}", ACCENT_COLOR)
         
+            self.display_message(f"You: {text}", ACCENT_COLOR)
+        
         self.message_entry.delete("1.0", tk.END)
 
     def handle_command(self, text):
@@ -724,8 +732,7 @@ class ChatApp:
         """Clean up when closing the application"""
         global running
         running = False
-        
-        # Send leave message
+
         if self.nickname_set:
             try:
                 leave_data = {
@@ -753,3 +760,6 @@ if __name__ == "__main__":
     app = ChatApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
+
+
+
