@@ -731,12 +731,10 @@ class ChatApp:
     def on_closing(self):
         """Clean up when closing the application"""
         global running
-        running = False
-
+        running = False 
         if self.nickname_set:
             try:
                 leave_data = {
-                    'type': 'leave',
                     'nickname': self.nickname,
                     'ip': self.local_ip,
                     'client_id': self.client_id,
