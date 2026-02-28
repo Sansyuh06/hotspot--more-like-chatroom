@@ -721,7 +721,6 @@ class ChatApp:
             self.show_error(f"Could not open file: {e}\nLocation: {filepath}")
 
     def format_size(self, size):
-        """Format bytes to human readable string"""
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size < 1024:
                 return f"{size:.1f} {unit}"
@@ -729,7 +728,6 @@ class ChatApp:
         return f"{size:.1f} TB"
 
     def on_closing(self):
-        """Clean up when closing the application"""
         global running
         running = False 
         if self.nickname_set:
